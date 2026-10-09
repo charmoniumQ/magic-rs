@@ -108,7 +108,8 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    fs,
+    path::{Path, PathBuf},
 };
 
 use proc_macro::TokenStream;
@@ -222,6 +223,21 @@ fn meta_name_value_to_string_vec(
     }
 }
 
+/// Lists the regular files directly contained in `dir`, sorted by path.
+///
+/// Directories are not traversed, matching the previous non-recursive walk.
+fn list_dir_files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_file() {
+            files.push(path);
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
 fn impl_magic_embed(attr: TokenStream, item: TokenStream) -> Result<TokenStream, syn::Error> {
     // Parse the input function
     let input_struct: ItemStruct = syn::parse2(item.into())?;
@@ -261,9 +277,6 @@ fn impl_magic_embed(attr: TokenStream, item: TokenStream) -> Result<TokenStream,
         .collect();
 
     // we don't walk rules recursively
-    let mut wo = fs_walk::WalkOptions::new();
-    wo.files().max_depth(0).sort(true);
-
     let mut db = MagicDb::new();
 
     let exclude_set: HashSet<PathBuf> = exclude.into_iter().map(|(_, p)| p).collect();
@@ -285,10 +298,10 @@ fn impl_magic_embed(attr: TokenStream, item: TokenStream) -> Result<TokenStream,
     let mut rules = vec![];
     for (s, p) in include.iter() {
         if p.is_dir() {
-            for rule_file in wo.walk(p) {
-                let rule_file = rule_file
-                    .map_err(|e| syn::Error::new(*s, format!("failed to list rule file: {e}")))?;
+            let rule_files = list_dir_files(p)
+                .map_err(|e| syn::Error::new(*s, format!("failed to list rule file: {e}")))?;
 
+            for rule_file in rule_files {
                 if exclude_set.contains(&rule_file) {
                     continue;
                 }

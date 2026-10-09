@@ -115,7 +115,6 @@ use std::{
 
 use anyhow::anyhow;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, builder::styling};
-use fs_walk::WalkOptions;
 use pure_magic::{Magic, MagicDb, MagicSource, readers::DataReader};
 use serde_derive::Serialize;
 use tracing::{debug, error, info, level_filters::LevelFilter};
@@ -337,19 +336,16 @@ impl Command {
         }
 
         for item in o.paths.iter() {
-            let mut wo = WalkOptions::new();
-            wo.files().sort(true);
-
-            if !o.recursive {
-                wo.max_depth(0);
-            }
-
             if item.to_string_lossy() == "-" {
                 scan_stdin!();
                 continue;
             }
 
-            for f in wo.walk(item).flatten() {
+            let max_depth = if o.recursive { None } else { Some(0) };
+            let mut files = Vec::new();
+            collect_files(item, max_depth, &mut files);
+
+            for f in files {
                 debug!("scanning file: {}", f.to_string_lossy());
                 let Ok(reader) = File::open(&f)
                     .and_then(DataReader::from_file)
@@ -468,6 +464,44 @@ impl<'m> SerMagicResult<'m> {
     }
 }
 
+fn collect_files(root: &Path, max_depth: Option<u64>, out: &mut Vec<PathBuf>) {
+    if root.is_file() {
+        out.push(root.to_path_buf());
+        return;
+    }
+
+    if !root.is_dir() {
+        return;
+    }
+
+    collect_files_rec(root, 0, max_depth, out);
+}
+
+fn collect_files_rec(dir: &Path, depth: u64, max_depth: Option<u64>, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .collect();
+    paths.sort();
+
+    for path in paths {
+        if path.is_file() {
+            out.push(path);
+        } else if path.is_dir() && !path.is_symlink() {
+            if let Some(max) = max_depth {
+                if depth + 1 > max {
+                    continue;
+                }
+            }
+            collect_files_rec(&path, depth + 1, max_depth, out);
+        }
+    }
+}
+
 fn db_load_rules(
     db: &mut MagicDb,
     rules: &[PathBuf],
@@ -476,12 +510,9 @@ fn db_load_rules(
     let mut sources = vec![];
     for rule in rules {
         if rule.is_dir() {
-            let walker = WalkOptions::new()
-                .files()
-                .max_depth(1)
-                .sort(true)
-                .walk(rule);
-            for p in walker.flatten() {
+            let mut files = Vec::new();
+            collect_files(rule, Some(1), &mut files);
+            for p in files {
                 info!("loading magic rule: {}", p.to_string_lossy());
                 if let Ok(source) = MagicSource::open(&p).inspect_err(|e| {
                     if !silent {
